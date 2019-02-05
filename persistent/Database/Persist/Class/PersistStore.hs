@@ -2,6 +2,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE TypeSynonymInstances #-}
 module Database.Persist.Class.PersistStore
     ( HasPersistBackend (..)
     , MonadBackend (..)
