@@ -4,6 +4,7 @@
 {-# LANGUAGE ConstraintKinds #-}
 module Database.Persist.Class.PersistStore
     ( HasPersistBackend (..)
+    , MonadBackend (..)
     , IsPersistBackend (..)
     , PersistRecordBackend
     , liftPersist
@@ -25,11 +26,13 @@ import qualified Data.Text as T
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Exception (throwIO)
 import Control.Monad.Trans.Reader (ReaderT)
-import Control.Monad.Reader (MonadReader (ask), runReaderT)
+import Control.Monad.Trans.Resource (ResourceT)
+import Control.Monad.Reader (MonadReader (ask), lift, runReaderT)
 import Database.Persist.Class.PersistEntity
 import Database.Persist.Class.PersistField
 import Database.Persist.Types
 import qualified Data.Aeson as A
+import Data.Conduit (ConduitM)
 import qualified Data.Map as Map
 import Data.Map (Map)
 import qualified Data.Maybe as Maybe
@@ -51,6 +54,22 @@ class (HasPersistBackend backend) => IsPersistBackend backend where
     -- It should be used carefully and only when actually constructing a @backend@. Careless use allows us
     -- to accidentally run a write query against a read-only database.
     mkPersistBackend :: BaseBackend backend -> backend
+
+class (MonadIO m) => MonadBackend m where
+    type Backend m
+    askBackend :: m (Backend m)
+
+instance (MonadIO m) => MonadBackend (ReaderT backend m) where
+    type Backend (ReaderT backend m) = backend
+    askBackend = ask
+
+instance (MonadBackend m) => MonadBackend (ConduitM i o m) where
+    type Backend (ConduitM i o m) = Backend m
+    askBackend = lift askBackend
+
+instance (MonadBackend m) => MonadBackend (ResourceT m) where
+    type Backend (ResourceT m) = Backend m
+    askBackend = lift askBackend
 
 -- | This class witnesses that two backend are compatible, and that you can
 -- convert from the @sub@ backend into the @sup@ backend. This is similar
@@ -100,10 +119,10 @@ class BackendCompatible sup sub where
 type PersistRecordBackend record backend = (PersistEntity record, PersistEntityBackend record ~ BaseBackend backend)
 
 liftPersist
-    :: (MonadIO m, MonadReader backend m, HasPersistBackend backend)
+    :: (MonadBackend m, Backend m ~ backend, HasPersistBackend backend)
     => ReaderT (BaseBackend backend) IO b -> m b
 liftPersist f = do
-    env <- ask
+    env <- askBackend
     liftIO $ runReaderT f (persistBackend env)
 
 -- | 'ToBackendKey' converts a 'PersistEntity' 'Key' into a 'BackendKey'
@@ -149,8 +168,8 @@ class
     -- > +------+-----+
     -- > | SPJ  |  40 |
     -- > +------+-----+
-    get :: (MonadIO m, PersistRecordBackend record backend)
-        => Key record -> ReaderT backend m (Maybe record)
+    get :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+        => Key record -> m (Maybe record)
 
     -- | Get many records by their respective identifiers, if available.
     --
@@ -175,8 +194,8 @@ class
     -- > |  2 | Simon |  41 |
     -- > +----+-------+-----+
     getMany
-        :: (MonadIO m, PersistRecordBackend record backend)
-        => [Key record] -> ReaderT backend m (Map (Key record) record)
+        :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+        => [Key record] -> m (Map (Key record) record)
     getMany [] = return Map.empty
     getMany ks = do
         vs <- mapM get ks
@@ -214,8 +233,8 @@ class
     -- > +-----+------+-----+
     -- > |3    |John  |30   |
     -- > +-----+------+-----+
-    insert :: (MonadIO m, PersistRecordBackend record backend)
-           => record -> ReaderT backend m (Key record)
+    insert :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+           => record -> m (Key record)
 
     -- | Same as 'insert', but doesn't return a @Key@.
     --
@@ -237,8 +256,8 @@ class
     -- > +-----+------+-----+
     -- > |3    |John  |30   |
     -- > +-----+------+-----+
-    insert_ :: (MonadIO m, PersistRecordBackend record backend)
-            => record -> ReaderT backend m ()
+    insert_ :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+            => record -> m ()
     insert_ record = insert record >> return ()
 
     -- | Create multiple records in the database and return their 'Key's.
@@ -275,8 +294,8 @@ class
     -- > +-----+------+-----+
     -- > |5    |Jane  |20   |
     -- > +-----+------+-----+
-    insertMany :: (MonadIO m, PersistRecordBackend record backend)
-               => [record] -> ReaderT backend m [Key record]
+    insertMany :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+               => [record] -> m [Key record]
     insertMany = mapM insert
 
     -- | Same as 'insertMany', but doesn't return any 'Key's.
@@ -306,8 +325,8 @@ class
     -- > +-----+------+-----+
     -- > |5    |Jane  |20   |
     -- > +-----+------+-----+
-    insertMany_ :: (MonadIO m, PersistRecordBackend record backend)
-                => [record] -> ReaderT backend m ()
+    insertMany_ :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+                => [record] -> m ()
     insertMany_ x = insertMany x >> return ()
 
     -- | Same as 'insertMany_', but takes an 'Entity' instead of just a record.
@@ -338,8 +357,8 @@ class
     -- > +-----+------+-----+
     -- > |4    |Eva   |38   |
     -- > +-----+------+-----+
-    insertEntityMany :: (MonadIO m, PersistRecordBackend record backend)
-                     => [Entity record] -> ReaderT backend m ()
+    insertEntityMany :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+                     => [Entity record] -> m ()
     insertEntityMany = mapM_ (\(Entity k record) -> insertKey k record)
 
     -- | Create a new record in the database using the given key.
@@ -363,8 +382,8 @@ class
     -- > +-----+------+-----+
     -- > |3    |Alice |20   |
     -- > +-----+------+-----+
-    insertKey :: (MonadIO m, PersistRecordBackend record backend)
-              => Key record -> record -> ReaderT backend m ()
+    insertKey :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+              => Key record -> record -> m ()
 
     -- | Put the record in the database with the given key.
     -- Unlike 'replace', if a record with the given key does not
@@ -426,8 +445,8 @@ class
     -- > +-----+------+-----+
     -- > |3    |X     |999  |
     -- > +-----+------+-----+
-    repsert :: (MonadIO m, PersistRecordBackend record backend)
-            => Key record -> record -> ReaderT backend m ()
+    repsert :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+            => Key record -> record -> m ()
 
     -- | Put many entities into the database.
     --
@@ -457,8 +476,8 @@ class
     -- > |999  |Mr. X           |999      |
     -- > +-----+----------------+---------+
     repsertMany
-        :: (MonadIO m, PersistRecordBackend record backend)
-        => [(Key record, record)] -> ReaderT backend m ()
+        :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+        => [(Key record, record)] -> m ()
     repsertMany = mapM_ (uncurry repsert)
 
     -- | Replace the record in the database with the given
@@ -482,8 +501,8 @@ class
     -- > +-----+------+-----+
     -- > |2    |Simon |41   |
     -- > +-----+------+-----+
-    replace :: (MonadIO m, PersistRecordBackend record backend)
-            => Key record -> record -> ReaderT backend m ()
+    replace :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+            => Key record -> record -> m ()
 
     -- | Delete a specific record by identifier. Does nothing if record does
     -- not exist.
@@ -502,8 +521,8 @@ class
     -- > +-----+------+-----+
     -- > |2    |Simon |41   |
     -- > +-----+------+-----+
-    delete :: (MonadIO m, PersistRecordBackend record backend)
-           => Key record -> ReaderT backend m ()
+    delete :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+           => Key record -> m ()
 
     -- | Update individual fields on a specific record.
     --
@@ -525,8 +544,8 @@ class
     -- > +-----+------+-----+
     -- > |2    |Simon |41   |
     -- > +-----+------+-----+
-    update :: (MonadIO m, PersistRecordBackend record backend)
-           => Key record -> [Update record] -> ReaderT backend m ()
+    update :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+           => Key record -> [Update record] -> m ()
 
     -- | Update individual fields on a specific record, and retrieve the
     -- updated value from the database.
@@ -552,8 +571,8 @@ class
     -- > +-----+------+-----+
     -- > |2    |Simon |41   |
     -- > +-----+------+-----+
-    updateGet :: (MonadIO m, PersistRecordBackend record backend)
-              => Key record -> [Update record] -> ReaderT backend m record
+    updateGet :: (MonadBackend m, Backend m ~ backend, PersistRecordBackend record backend)
+              => Key record -> [Update record] -> m record
     updateGet key ups = do
         update key ups
         get key >>= maybe (liftIO $ throwIO $ KeyNotFound $ show key) return
@@ -588,8 +607,9 @@ class
 getJust :: ( PersistStoreRead backend
            , Show (Key record)
            , PersistRecordBackend record backend
-           , MonadIO m
-           ) => Key record -> ReaderT backend m record
+           , MonadBackend m
+           , Backend m ~ backend
+           ) => Key record -> m record
 getJust key = get key >>= maybe
   (liftIO $ throwIO $ PersistForeignConstraintUnmet $ T.pack $ show key)
   return
@@ -616,10 +636,11 @@ getJust key = get key >>= maybe
 -- > +----+------+-----+
 getJustEntity
   :: (PersistEntityBackend record ~ BaseBackend backend
-     ,MonadIO m
+     ,MonadBackend m
+     ,Backend m ~ backend
      ,PersistEntity record
      ,PersistStoreRead backend)
-  => Key record -> ReaderT backend m (Entity record)
+  => Key record -> m (Entity record)
 getJustEntity key = do
   record <- getJust key
   return $
@@ -635,8 +656,9 @@ belongsTo ::
   ( PersistStoreRead backend
   , PersistEntity ent1
   , PersistRecordBackend ent2 backend
-  , MonadIO m
-  ) => (ent1 -> Maybe (Key ent2)) -> ent1 -> ReaderT backend m (Maybe ent2)
+  , MonadBackend m
+  , Backend m ~ backend
+  ) => (ent1 -> Maybe (Key ent2)) -> ent1 -> m (Maybe ent2)
 belongsTo foreignKeyField model = case foreignKeyField model of
     Nothing -> return Nothing
     Just f -> get f
@@ -646,9 +668,10 @@ belongsToJust ::
   ( PersistStoreRead backend
   , PersistEntity ent1
   , PersistRecordBackend ent2 backend
-  , MonadIO m
+  , MonadBackend m
+  , Backend m ~ backend
   )
-  => (ent1 -> Key ent2) -> ent1 -> ReaderT backend m ent2
+  => (ent1 -> Key ent2) -> ent1 -> m ent2
 belongsToJust getForeignKey model = getJust $ getForeignKey model
 
 -- | Like @insert@, but returns the complete @Entity@.
@@ -676,8 +699,9 @@ belongsToJust getForeignKey model = getJust $ getForeignKey model
 insertEntity ::
     ( PersistStoreWrite backend
     , PersistRecordBackend e backend
-    , MonadIO m
-    ) => e -> ReaderT backend m (Entity e)
+    , MonadBackend m
+    , Backend m ~ backend
+    ) => e -> m (Entity e)
 insertEntity e = do
     eid <- insert e
     return $ Entity eid e
@@ -703,8 +727,9 @@ insertEntity e = do
 getEntity ::
     ( PersistStoreRead backend
     , PersistRecordBackend e backend
-    , MonadIO m
-    ) => Key e -> ReaderT backend m (Maybe (Entity e))
+    , MonadBackend m
+    , Backend m ~ backend
+    ) => Key e -> m (Maybe (Entity e))
 getEntity key = do
     maybeModel <- get key
     return $ fmap (key `Entity`) maybeModel
@@ -736,9 +761,10 @@ getEntity key = do
 insertRecord
   :: (PersistEntityBackend record ~ BaseBackend backend
      ,PersistEntity record
-     ,MonadIO m
+     ,MonadBackend m
+     ,Backend m ~ backend
      ,PersistStoreWrite backend)
-  => record -> ReaderT backend m record
+  => record -> m record
 insertRecord record = do
   insert_ record
   return $ record

@@ -120,6 +120,7 @@ module Database.Persist.Class
     , entityValues
 
     -- * Lifting
+    , MonadBackend (..)
     , HasPersistBackend (..)
     , IsPersistBackend ()
     , liftPersist

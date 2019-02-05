@@ -24,18 +24,19 @@ import Data.List (nubBy)
 import Data.Function (on)
 
 defaultUpsert
-    :: (MonadIO m
+    :: (MonadBackend m
+       ,Backend m ~ backend
        ,PersistEntity record
        ,PersistUniqueWrite backend
        ,PersistEntityBackend record ~ BaseBackend backend)
-    => record -> [Update record] -> ReaderT backend m (Entity record)
+    => record -> [Update record] -> m (Entity record)
 defaultUpsert record updates = do
     uniqueKey <- onlyUnique record
     upsertBy uniqueKey record updates
 
 instance PersistUniqueWrite SqlBackend where
     upsert record updates = do
-      conn <- ask
+      conn <- askBackend
       let escape = connEscapeName conn
       let refCol n = T.concat [escape (entityDB t), ".", n]
       let mkUpdateText = mkUpdateText' escape refCol
@@ -58,7 +59,7 @@ instance PersistUniqueWrite SqlBackend where
           unqs uniqueKey = concatMap persistUniqueToValues [uniqueKey]
 
     deleteBy uniq = do
-        conn <- ask
+        conn <- askBackend
         let sql' = sql conn
             vals = persistUniqueToValues uniq
         rawExecute sql' vals
@@ -85,19 +86,19 @@ instance PersistUniqueWrite SqlBackend where
             let ent = entityDef rs
             let nr  = length rs
             let toVals r = map toPersistValue $ toPersistFields r
-            conn <- ask
+            conn <- askBackend
             case connPutManySql conn of
                 (Just mkSql) -> rawExecute (mkSql ent nr) (concatMap toVals rs)
                 Nothing -> defaultPutMany rs
 
 instance PersistUniqueWrite SqlWriteBackend where
-    deleteBy uniq = withReaderT persistBackend $ deleteBy uniq
-    upsert rs us = withReaderT persistBackend $ upsert rs us
-    putMany rs = withReaderT persistBackend $ putMany rs
+    deleteBy uniq = basePersistBackend $ deleteBy uniq
+    upsert rs us = basePersistBackend $ upsert rs us
+    putMany rs = basePersistBackend $ putMany rs
 
 instance PersistUniqueRead SqlBackend where
     getBy uniq = do
-        conn <- ask
+        conn <- askBackend
         let sql =
                 T.concat
                     [ "SELECT "
@@ -125,10 +126,10 @@ instance PersistUniqueRead SqlBackend where
         toFieldNames' = map snd . persistUniqueToFieldNames
 
 instance PersistUniqueRead SqlReadBackend where
-    getBy uniq = withReaderT persistBackend $ getBy uniq
+    getBy uniq = basePersistBackend $ getBy uniq
 
 instance PersistUniqueRead SqlWriteBackend where
-    getBy uniq = withReaderT persistBackend $ getBy uniq
+    getBy uniq = basePersistBackend $ getBy uniq
 
 dummyFromUnique :: Unique v -> Maybe v
 dummyFromUnique _ = Nothing

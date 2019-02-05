@@ -14,6 +14,7 @@ module Database.Persist.Sql.Types.Internal
     , readToUnknown
     , readToWrite
     , writeToUnknown
+    , basePersistBackend
     , LogFunc
     , InsertSqlResult (..)
     , Statement (..)
@@ -41,7 +42,7 @@ import Data.String (IsString)
 import Data.Text (Text)
 import Data.Typeable (Typeable)
 import Database.Persist.Class
-  ( HasPersistBackend (..)
+  ( HasPersistBackend (..), MonadBackend(..)
   , PersistQueryRead, PersistQueryWrite
   , PersistStoreRead, PersistStoreWrite
   , PersistUniqueRead, PersistUniqueWrite
@@ -189,6 +190,12 @@ readToUnknown :: Monad m => ReaderT SqlReadBackend m a -> ReaderT SqlBackend m a
 readToUnknown ma = do
   unknown <- ask
   lift . runReaderT ma $ SqlReadBackend unknown
+
+-- | Useful for running a query against functions that use the base backend.
+basePersistBackend :: (MonadBackend m, Backend m ~ backend, HasPersistBackend backend) => ReaderT (BaseBackend backend) m a -> m a
+basePersistBackend ma = do
+  b <- askBackend
+  runReaderT ma $ persistBackend b
 
 -- | A constraint synonym which witnesses that a backend is SQL and can run read queries.
 type SqlBackendCanRead backend =

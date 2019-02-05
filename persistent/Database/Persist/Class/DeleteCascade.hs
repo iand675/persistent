@@ -23,12 +23,12 @@ class (PersistStoreWrite backend, PersistEntity record, BaseBackend backend ~ Pe
 
     -- | Perform cascade-deletion of single database
     -- entry.
-    deleteCascade :: MonadIO m => Key record -> ReaderT backend m ()
+    deleteCascade :: (MonadBackend m, Backend m ~ backend) => Key record -> m ()
 
 -- | Cascade-deletion of entries satisfying given filters.
-deleteCascadeWhere :: (MonadIO m, DeleteCascade record backend, PersistQueryWrite backend)
-                   => [Filter record] -> ReaderT backend m ()
+deleteCascadeWhere :: (MonadBackend m, Backend m ~ backend, DeleteCascade record backend, PersistQueryWrite backend)
+                   => [Filter record] -> m ()
 deleteCascadeWhere filts = do
     srcRes <- selectKeysRes filts []
-    conn <- ask
+    conn <- askBackend
     liftIO $ with srcRes (\src -> runConduit $ src .| CL.mapM_ (flip runReaderT conn . deleteCascade))

@@ -49,11 +49,11 @@ import qualified Data.Map as Map
 import qualified Data.Foldable as Foldable
 import Data.Function (on)
 
-withRawQuery :: MonadIO m
+withRawQuery :: (MonadBackend m, Backend m ~ SqlBackend)
              => Text
              -> [PersistValue]
              -> ConduitM [PersistValue] Void IO a
-             -> ReaderT SqlBackend m a
+             -> m a
 withRawQuery sql vals sink = do
     srcRes <- rawQueryRes sql vals
     liftIO $ with srcRes (\src -> runConduit $ src .| sink)
@@ -84,10 +84,11 @@ getTableName :: forall record m backend.
              ( PersistEntity record
              , PersistEntityBackend record ~ SqlBackend
              , IsSqlBackend backend
-             , Monad m
-             ) => record -> ReaderT backend m Text
-getTableName rec = withReaderT persistBackend $ do
-    conn <- ask
+             , MonadBackend m
+             , Backend m ~ backend
+             ) => record -> m Text
+getTableName rec = basePersistBackend $ do
+    conn <- askBackend
     return $ connEscapeName conn $ tableDBName rec
 
 -- | useful for a backend to implement tableName by adding escaping
@@ -103,11 +104,12 @@ getFieldName :: forall record typ m backend.
              ( PersistEntity record
              , PersistEntityBackend record ~ SqlBackend
              , IsSqlBackend backend
-             , Monad m
+             , MonadBackend m
+             , Backend m ~ backend
              )
-             => EntityField record typ -> ReaderT backend m Text
-getFieldName rec = withReaderT persistBackend $ do
-    conn <- ask
+             => EntityField record typ -> m Text
+getFieldName rec = basePersistBackend $ do
+    conn <- askBackend
     return $ connEscapeName conn $ fieldDBName rec
 
 -- | useful for a backend to implement fieldName by adding escaping
@@ -137,7 +139,7 @@ instance BackendCompatible SqlBackend SqlWriteBackend where
 instance PersistStoreWrite SqlBackend where
     update _ [] = return ()
     update k upds = do
-        conn <- ask
+        conn <- askBackend
         let wher = whereStmtForKey conn k
         let sql = T.concat
                 [ "UPDATE "
@@ -151,7 +153,7 @@ instance PersistStoreWrite SqlBackend where
             map updatePersistValue upds `mappend` keyToValues k
 
     insert val = do
-        conn <- ask
+        conn <- askBackend
         let esql = connInsertSql conn t vals
         key <-
             case esql of
@@ -210,7 +212,7 @@ instance PersistStoreWrite SqlBackend where
 
     insertMany [] = return []
     insertMany vals = do
-        conn <- ask
+        conn <- askBackend
 
         case connInsertManySql conn of
             Nothing -> mapM insert vals
@@ -226,7 +228,7 @@ instance PersistStoreWrite SqlBackend where
       where
         t = entityDef vals0
         insertMany_' vals = do
-          conn <- ask
+          conn <- askBackend
           let valss = map (map toPersistValue . toPersistFields) vals
           let sql = T.concat
                   [ "INSERT INTO "
@@ -240,7 +242,7 @@ instance PersistStoreWrite SqlBackend where
           rawExecute sql (concat valss)
 
     replace k val = do
-        conn <- ask
+        conn <- askBackend
         let t = entityDef $ Just val
         let wher = whereStmtForKey conn k
         let sql = T.concat
@@ -259,7 +261,7 @@ instance PersistStoreWrite SqlBackend where
     insertKey k v = insrepHelper "INSERT" [Entity k v]
 
     insertEntityMany es' = do
-        conn <- ask
+        conn <- askBackend
         let entDef = entityDef $ map entityVal es'
         let columnNames = keyAndEntityColumnNames entDef conn
         runChunked (length columnNames) go es'
@@ -274,7 +276,7 @@ instance PersistStoreWrite SqlBackend where
 
     repsertMany [] = return ()
     repsertMany krsDups = do
-        conn <- ask
+        conn <- askBackend
         let krs = nubBy ((==) `on` fst) (reverse krsDups)
         let rs = snd `fmap` krs
         let ent = entityDef rs
@@ -288,7 +290,7 @@ instance PersistStoreWrite SqlBackend where
             Nothing -> mapM_ (uncurry repsert) krs
 
     delete k = do
-        conn <- ask
+        conn <- askBackend
         rawExecute (sql conn) (keyToValues k)
       where
         wher conn = whereStmtForKey conn k
@@ -298,17 +300,18 @@ instance PersistStoreWrite SqlBackend where
             , " WHERE "
             , wher conn
             ]
+
 instance PersistStoreWrite SqlWriteBackend where
-    insert v = withReaderT persistBackend $ insert v
-    insertMany vs = withReaderT persistBackend $ insertMany vs
-    insertMany_ vs = withReaderT persistBackend $ insertMany_ vs
-    insertEntityMany vs = withReaderT persistBackend $ insertEntityMany vs
-    insertKey k v = withReaderT persistBackend $ insertKey k v
-    repsert k v = withReaderT persistBackend $ repsert k v
-    replace k v = withReaderT persistBackend $ replace k v
-    delete k = withReaderT persistBackend $ delete k
-    update k upds = withReaderT persistBackend $ update k upds
-    repsertMany krs = withReaderT persistBackend $ repsertMany krs
+    insert v = basePersistBackend $ insert v
+    insertMany vs = basePersistBackend $ insertMany vs
+    insertMany_ vs = basePersistBackend $ insertMany_ vs
+    insertEntityMany vs = basePersistBackend $ insertEntityMany vs
+    insertKey k v = basePersistBackend $ insertKey k v
+    repsert k v = basePersistBackend $ repsert k v
+    replace k v = basePersistBackend $ replace k v
+    delete k = basePersistBackend $ delete k
+    update k upds = basePersistBackend $ update k upds
+    repsertMany krs = basePersistBackend $ repsertMany krs
 
 instance PersistStoreRead SqlBackend where
     get k = do
@@ -318,7 +321,7 @@ instance PersistStoreRead SqlBackend where
     -- inspired by Database.Persist.Sql.Orphan.PersistQuery.selectSourceRes
     getMany []      = return Map.empty
     getMany ks@(k:_)= do
-        conn <- ask
+        conn <- askBackend
         let t = entityDef . dummyFromKey $ k
         let cols = commaSeparated . entityColumnNames t
         let wher = whereStmtForKeys conn ks
@@ -339,11 +342,11 @@ instance PersistStoreRead SqlBackend where
             return $ Map.fromList $ fmap (\e -> (entityKey e, entityVal e)) es
 
 instance PersistStoreRead SqlReadBackend where
-    get k = withReaderT persistBackend $ get k
-    getMany ks = withReaderT persistBackend $ getMany ks
+    get k = basePersistBackend $ get k
+    getMany ks = basePersistBackend $ getMany ks
 instance PersistStoreRead SqlWriteBackend where
-    get k = withReaderT persistBackend $ get k
-    getMany ks = withReaderT persistBackend $ getMany ks
+    get k = basePersistBackend $ get k
+    getMany ks = basePersistBackend $ getMany ks
 
 dummyFromKey :: Key record -> Maybe record
 dummyFromKey = Just . recordTypeFromKey
@@ -351,13 +354,13 @@ dummyFromKey = Just . recordTypeFromKey
 recordTypeFromKey :: Key record -> record
 recordTypeFromKey _ = error "dummyFromKey"
 
-insrepHelper :: (MonadIO m, PersistEntity val)
+insrepHelper :: (MonadBackend m, Backend m ~ SqlBackend, PersistEntity val)
              => Text
              -> [Entity val]
-             -> ReaderT SqlBackend m ()
+             -> m ()
 insrepHelper _       []  = return ()
 insrepHelper command es = do
-    conn <- ask
+    conn <- askBackend
     let columnNames = keyAndEntityColumnNames entDef conn
     rawExecute (sql conn columnNames) vals
   where
@@ -375,14 +378,14 @@ insrepHelper command es = do
     vals = Foldable.foldMap entityValues es
 
 runChunked
-    :: (Monad m)
+    :: (MonadBackend m, Backend m ~ SqlBackend)
     => Int
-    -> ([a] -> ReaderT SqlBackend m ())
+    -> ([a] -> m ())
     -> [a]
-    -> ReaderT SqlBackend m ()
+    -> m ()
 runChunked _ _ []     = return ()
 runChunked width m xs = do
-    conn <- ask
+    conn <- askBackend
     case connMaxParams conn of
         Nothing -> m xs
         Just maxParams -> let chunkSize = maxParams `div` width in

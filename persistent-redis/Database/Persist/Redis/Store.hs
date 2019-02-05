@@ -9,6 +9,7 @@ module Database.Persist.Redis.Store
     )where
 
 import Database.Persist
+import Control.Monad.Reader (runReaderT)
 import Control.Monad.IO.Class (MonadIO (..))
 import qualified Database.Persist.Sql as Sql
 import qualified Database.Redis as R
@@ -44,6 +45,12 @@ execRedisT action = do
         (Right x) -> return x
         (Left x)  -> fail x
 
+runRedisT :: (MonadIO m, MonadBackend m, Backend m ~ R.Connection) => R.RedisTx (R.Queued a) -> m a
+runRedisT m = do
+  b <- askBackend
+  runReaderT (execRedisT m) b
+
+
 instance HasPersistBackend R.Connection where
   type BaseBackend R.Connection = R.Connection
   persistBackend = id
@@ -54,7 +61,7 @@ instance PersistCore R.Connection where
 
 instance PersistStoreRead R.Connection where
     get k = do
-        r <- execRedisT $ R.hgetall (unKey k)
+        r <- runRedisT $ R.hgetall (unKey k)
         if null r
             then return Nothing
             else do
@@ -63,7 +70,7 @@ instance PersistStoreRead R.Connection where
 
 instance PersistStoreWrite R.Connection where
     insert val = do
-        keyId <- execRedisT $ createKey val
+        keyId <- runRedisT $ createKey val
         let textKey = toKeyText val keyId
         key <- toKey textKey
         _ <- insertKey key val
@@ -72,11 +79,11 @@ instance PersistStoreWrite R.Connection where
     insertKey k val = do
         let fields = toInsertFields val
         -- Inserts a hash map into <object>_<id> record
-        _ <- execRedisT $ R.hmset (unKey k) fields
+        _ <- runRedisT $ R.hmset (unKey k) fields
         return ()
 
     repsert k val = do
-        _ <- execRedisT $ R.del [unKey k]
+        _ <- runRedisT $ R.del [unKey k]
         insertKey k val
         return ()
 
@@ -86,7 +93,7 @@ instance PersistStoreWrite R.Connection where
         return ()
 
     delete k = do
-        r <- execRedisT $ R.del [unKey k]
+        r <- runRedisT $ R.del [unKey k]
         case r of
             0 -> fail "there is no such key!"
             1 -> return ()
@@ -94,7 +101,7 @@ instance PersistStoreWrite R.Connection where
 
     update _ [] = return ()
     update k upds = do
-        r <- execRedisT $ R.hgetall (unKey k)
+        r <- runRedisT $ R.hgetall (unKey k)
         if null r
             then fail "No such key exists!"
             else do

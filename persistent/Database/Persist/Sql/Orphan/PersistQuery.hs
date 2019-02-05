@@ -21,7 +21,7 @@ import Data.Text (Text)
 import Data.Monoid (Monoid (..), (<>))
 import Data.Int (Int64)
 import Control.Monad.IO.Class
-import Control.Monad.Trans.Reader (ReaderT, ask, withReaderT)
+import Control.Monad.Trans.Reader (ReaderT, withReaderT)
 import Control.Exception (throwIO)
 import qualified Data.Conduit.List as CL
 import Data.Conduit
@@ -32,7 +32,7 @@ import Data.List (transpose, inits, find)
 -- orphaned instance for convenience of modularity
 instance PersistQueryRead SqlBackend where
     count filts = do
-        conn <- ask
+        conn <- askBackend
         let wher = if null filts
                     then ""
                     else filterClause False conn filts
@@ -55,7 +55,7 @@ instance PersistQueryRead SqlBackend where
         t = entityDef $ dummyFromFilts filts
 
     selectSourceRes filts opts = do
-        conn <- ask
+        conn <- askBackend
         srcRes <- rawQueryRes (sql conn) (getFiltsValues conn filts)
         return $ fmap (.| CL.mapM parse) srcRes
       where
@@ -83,7 +83,7 @@ instance PersistQueryRead SqlBackend where
             ]
 
     selectKeysRes filts opts = do
-        conn <- ask
+        conn <- askBackend
         srcRes <- rawQueryRes (sql conn) (getFiltsValues conn filts)
         return $ fmap (.| CL.mapM parse) srcRes
       where
@@ -125,13 +125,13 @@ instance PersistQueryRead SqlBackend where
                 Right k -> return k
                 Left err -> error $ "selectKeysImpl: keyFromValues failed" <> show err
 instance PersistQueryRead SqlReadBackend where
-    count filts = withReaderT persistBackend $ count filts
-    selectSourceRes filts opts = withReaderT persistBackend $ selectSourceRes filts opts
-    selectKeysRes filts opts = withReaderT persistBackend $ selectKeysRes filts opts
+    count filts = basePersistBackend $ count filts
+    selectSourceRes filts opts = basePersistBackend $ selectSourceRes filts opts
+    selectKeysRes filts opts = basePersistBackend $ selectKeysRes filts opts
 instance PersistQueryRead SqlWriteBackend where
-    count filts = withReaderT persistBackend $ count filts
-    selectSourceRes filts opts = withReaderT persistBackend $ selectSourceRes filts opts
-    selectKeysRes filts opts = withReaderT persistBackend $ selectKeysRes filts opts
+    count filts = basePersistBackend $ count filts
+    selectSourceRes filts opts = basePersistBackend $ selectSourceRes filts opts
+    selectKeysRes filts opts = basePersistBackend $ selectKeysRes filts opts
 
 instance PersistQueryWrite SqlBackend where
     deleteWhere filts = do
@@ -141,17 +141,17 @@ instance PersistQueryWrite SqlBackend where
         _ <- updateWhereCount filts upds
         return ()
 instance PersistQueryWrite SqlWriteBackend where
-    deleteWhere filts = withReaderT persistBackend $ deleteWhere filts
-    updateWhere filts upds = withReaderT persistBackend $ updateWhere filts upds
+    deleteWhere filts = basePersistBackend $ deleteWhere filts
+    updateWhere filts upds = basePersistBackend $ updateWhere filts upds
 
 -- | Same as 'deleteWhere', but returns the number of rows affected.
 --
 -- @since 1.1.5
-deleteWhereCount :: (PersistEntity val, MonadIO m, PersistEntityBackend val ~ SqlBackend, IsSqlBackend backend)
+deleteWhereCount :: (PersistEntity val, MonadIO m, PersistEntityBackend val ~ SqlBackend, IsSqlBackend backend, MonadBackend m, Backend m ~ backend)
                  => [Filter val]
-                 -> ReaderT backend m Int64
-deleteWhereCount filts = withReaderT persistBackend $ do
-    conn <- ask
+                 -> m Int64
+deleteWhereCount filts = basePersistBackend $ do
+    conn <- askBackend
     let t = entityDef $ dummyFromFilts filts
     let wher = if null filts
                 then ""
@@ -166,13 +166,13 @@ deleteWhereCount filts = withReaderT persistBackend $ do
 -- | Same as 'updateWhere', but returns the number of rows affected.
 --
 -- @since 1.1.5
-updateWhereCount :: (PersistEntity val, MonadIO m, SqlBackend ~ PersistEntityBackend val, IsSqlBackend backend)
+updateWhereCount :: (PersistEntity val, MonadIO m, SqlBackend ~ PersistEntityBackend val, IsSqlBackend backend, MonadBackend m, Backend m ~ backend)
                  => [Filter val]
                  -> [Update val]
-                 -> ReaderT backend m Int64
+                 -> m Int64
 updateWhereCount _ [] = return 0
-updateWhereCount filts upds = withReaderT persistBackend $ do
-    conn <- ask
+updateWhereCount filts upds = basePersistBackend $ do
+    conn <- askBackend
     let wher = if null filts
                 then ""
                 else filterClause False conn filts

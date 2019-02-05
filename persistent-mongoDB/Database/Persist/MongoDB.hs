@@ -263,6 +263,11 @@ withConnection :: (Trans.MonadIO m, A.Applicative m)
 withConnection mc =
   withMongoDBPool (mgDatabase mc) (T.unpack $ mgHost mc) (mgPort mc) (mgAuth mc) (mgPoolStripes mc) (mgStripeConnections mc) (mgConnectionIdleTime mc)
 
+runMongo :: (Trans.MonadIO m, MonadBackend m, Backend m ~ DB.MongoContext) => DB.Action IO a -> m a
+runMongo m = do
+  b <- askBackend
+  liftIO $ runReaderT m b
+
 withMongoDBConn :: (Trans.MonadIO m, Applicative m)
                 => Database -> HostName -> PortID
                 -> Maybe MongoAuth -> NominalDiffTime
@@ -550,40 +555,42 @@ instance PersistCore DB.MongoContext where
         deriving (Show, Read, Eq, Ord, PersistField)
 
 instance PersistStoreWrite DB.MongoContext where
-    insert record = DB.insert (collectionName record) (toInsertDoc record)
-                >>= keyFrom_idEx
+    insert record = runMongo (DB.insert (collectionName record) (toInsertDoc record)
+                >>= keyFrom_idEx)
 
     insertMany [] = return []
-    insertMany records@(r:_) = mapM keyFrom_idEx =<<
-        DB.insertMany (collectionName r) (map toInsertDoc records)
+    insertMany records@(r:_) = runMongo (mapM keyFrom_idEx =<<
+        DB.insertMany (collectionName r) (map toInsertDoc records))
 
     insertEntityMany [] = return ()
-    insertEntityMany ents@(Entity _ r : _) =
+    insertEntityMany ents@(Entity _ r : _) = runMongo $
         DB.insertMany_ (collectionName r) (map entityToInsertDoc ents)
 
-    insertKey k record = DB.insert_ (collectionName record) $
+    insertKey k record = runMongo $
+                         DB.insert_ (collectionName record) $
                          entityToInsertDoc (Entity k record)
 
-    repsert   k record = DB.save (collectionName record) $
+    repsert   k record = runMongo $
+                         DB.save (collectionName record) $
                          documentFromEntity (Entity k record)
 
-    replace k record = do
+    replace k record = runMongo $ do
         DB.replace (selectByKey k) (recordToDocument record)
         return ()
 
-    delete k =
+    delete k = runMongo $
         DB.deleteOne DB.Select {
           DB.coll = collectionNameFromKey k
         , DB.selector = keyToMongoDoc k
         }
 
     update _ [] = return ()
-    update key upds =
+    update key upds = runMongo $
         DB.modify
            (DB.Select (keyToMongoDoc key) (collectionNameFromKey key))
            $ updatesToDoc upds
 
-    updateGet key upds = do
+    updateGet key upds = runMongo $ do
         result <- DB.findAndModify (queryByKey key) (updatesToDoc upds)
         either err instantiate result
       where
@@ -595,7 +602,7 @@ instance PersistStoreWrite DB.MongoContext where
 
 instance PersistStoreRead DB.MongoContext where
     get k = do
-            d <- DB.findOne (queryByKey k)
+            d <- runMongo $ DB.findOne (queryByKey k)
             case d of
               Nothing -> return Nothing
               Just doc -> do
@@ -606,7 +613,7 @@ instance PersistStoreRead DB.MongoContext where
 
 instance PersistUniqueRead DB.MongoContext where
     getBy uniq = do
-        mdoc <- DB.findOne $
+        mdoc <- runMongo $ DB.findOne $
           (DB.select (toUniquesDoc uniq) (collectionName rec)) {DB.project = projectionFromRecord rec}
         case mdoc of
             Nothing -> return Nothing
@@ -616,13 +623,13 @@ instance PersistUniqueRead DB.MongoContext where
         rec = dummyFromUnique uniq
 
 instance PersistUniqueWrite DB.MongoContext where
-    deleteBy uniq =
+    deleteBy uniq = runMongo $
         DB.delete DB.Select {
           DB.coll = collectionName $ dummyFromUnique uniq
         , DB.selector = toUniquesDoc uniq
         }
 
-    upsert newRecord upds = do
+    upsert newRecord upds = runMongo $ do
         uniq <- onlyUnique newRecord
         upsertBy uniq newRecord upds
 
@@ -636,9 +643,9 @@ instance PersistUniqueWrite DB.MongoContext where
 -- -            DB.modify selection $ updatesToDoc upds
 -- -        -- because findAndModify $setOnInsert is broken we do a separate get now
 
-    upsertBy uniq newRecord upds = do
+    upsertBy uniq newRecord upds = runMongo $ do
         let uniqueDoc = toUniquesDoc uniq :: [DB.Field]
-        let uniqKeys = map DB.label uniqueDoc :: [DB.Label]   
+        let uniqKeys = map DB.label uniqueDoc :: [DB.Label]
         let insDoc = DB.exclude uniqKeys $ toInsertDoc newRecord :: DB.Document
         let selection = DB.select uniqueDoc $ collectionName newRecord :: DB.Selection
         mdoc <- getBy uniq
@@ -706,20 +713,20 @@ projectionFromRecord = projectionFromEntityDef . entityDef . Just
 
 instance PersistQueryWrite DB.MongoContext where
     updateWhere _ [] = return ()
-    updateWhere filts upds =
+    updateWhere filts upds = runMongo $
         DB.modify DB.Select {
           DB.coll = collectionName $ dummyFromFilts filts
         , DB.selector = filtersToDoc filts
         } $ updatesToDoc upds
 
-    deleteWhere filts = do
+    deleteWhere filts = runMongo $ do
         DB.delete DB.Select {
           DB.coll = collectionName $ dummyFromFilts filts
         , DB.selector = filtersToDoc filts
         }
 
 instance PersistQueryRead DB.MongoContext where
-    count filts = do
+    count filts = runMongo $ do
         i <- DB.count query
         return $ fromIntegral i
       where
@@ -730,7 +737,7 @@ instance PersistQueryRead DB.MongoContext where
     -- If there is no sorting, it will turn the $snapshot option on
     -- and explicitly closes the cursor when done
     selectSourceRes filts opts = do
-        context <- ask
+        context <- askBackend
         return (pullCursor context `fmap` mkAcquire (open context) (close context))
       where
         close :: DB.MongoContext -> DB.Cursor -> IO ()
@@ -752,13 +759,13 @@ instance PersistQueryRead DB.MongoContext where
         (_, _, orders) = limitOffsetOrder opts
         noSort = null orders
 
-    selectFirst filts opts = DB.findOne (makeQuery filts opts)
-                         >>= Traversable.mapM (fromPersistValuesThrow t)
+    selectFirst filts opts = runMongo (DB.findOne (makeQuery filts opts)
+                         >>= Traversable.mapM (fromPersistValuesThrow t))
       where
         t = entityDef $ Just $ dummyFromFilts filts
 
     selectKeysRes filts opts = do
-        context <- ask
+        context <- askBackend
         let make = do
                 cursor <- liftIO $ flip runReaderT context $ DB.find $ (makeQuery filts opts) {
                     DB.project = [id_ DB.=: (1 :: Int)]

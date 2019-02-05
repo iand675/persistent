@@ -40,7 +40,7 @@ import Control.Monad.Logger (MonadLogger, runNoLoggingT)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (runExceptT)
-import Control.Monad.Trans.Reader (runReaderT, ReaderT)
+import Control.Monad.Trans.Reader (runReaderT)
 import Control.Monad.Trans.Writer (runWriterT)
 import Data.Either (partitionEithers)
 import Data.Monoid ((<>))
@@ -1062,12 +1062,14 @@ insertOnDuplicateKeyUpdate
   :: ( backend ~ PersistEntityBackend record
      , PersistEntity record
      , MonadIO m
+     , MonadBackend m
+     , Backend m ~ backend
      , PersistStore backend
      , BackendCompatible SqlBackend backend
      )
   => record
   -> [Update record]
-  -> ReaderT backend m ()
+  -> m ()
 insertOnDuplicateKeyUpdate record =
   insertManyOnDuplicateKeyUpdate [record] []
 
@@ -1224,11 +1226,13 @@ insertManyOnDuplicateKeyUpdate
     , BackendCompatible SqlBackend backend
     , PersistEntity record
     , MonadIO m
+    , MonadBackend m
+    , Backend m ~ backend
     )
     => [record] -- ^ A list of the records you want to insert, or update
     -> [HandleUpdateCollision record] -- ^ A list of the fields you want to copy over.
     -> [Update record] -- ^ A list of the updates to apply that aren't dependent on the record being inserted.
-    -> ReaderT backend m ()
+    -> m ()
 insertManyOnDuplicateKeyUpdate [] _ _ = return ()
 insertManyOnDuplicateKeyUpdate records fieldValues updates =
     uncurry rawExecute
